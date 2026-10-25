@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#102b2b">
+<title>Voice to Instrument</title>
+<style>
+:root{--bg:#0d2021;--panel:#183334;--mint:#69e0c0;--text:#f2fbf8;--muted:#a9c5c0;--danger:#ff887f}
+*{box-sizing:border-box}body{margin:0;background:linear-gradient(160deg,#102b2b,#091617);color:var(--text);font:16px system-ui,-apple-system,sans-serif;min-height:100vh}
+main{max-width:520px;margin:auto;padding:24px 18px 40px}.brand{color:var(--mint);font-size:12px;letter-spacing:.18em;font-weight:800}
+h1{font-size:32px;line-height:1.08;margin:9px 0 8px}p{color:var(--muted);line-height:1.5;margin-top:0}.panel{background:#183334;border:1px solid #2b4b4b;border-radius:22px;padding:18px;margin:18px 0}
+label{display:block;color:var(--muted);font-size:13px;margin:0 0 8px}
+select,button{font:inherit;border:0;border-radius:14px;padding:13px 15px;width:100%}select{background:#0d2425;color:var(--text);border:1px solid #3a5c59}
+button{font-weight:750;cursor:pointer;transition:transform .1s}button:active{transform:scale(.98)}button:disabled{opacity:.4;cursor:not-allowed}
+.primary{background:var(--mint);color:#092322}.secondary{background:#294747;color:var(--text);border:1px solid #456360}
+.actions{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}.meter{height:8px;background:#0b2222;border-radius:20px;overflow:hidden;margin:14px 0 6px}.meter span{display:block;width:0;height:100%;background:var(--mint);transition:width .08s}
+.status{font-size:13px;color:var(--muted);min-height:20px}.note{font-size:13px;color:var(--muted);margin-top:14px}.big{font-size:22px;font-weight:800}.pill{display:inline-block;background:#244746;color:var(--mint);padding:6px 10px;border-radius:99px;font-size:12px}
+footer{font-size:12px;color:#829e99;line-height:1.5;padding:0 3px}
+</style>
+</head>
+<body>
+<main>
+  <div class="brand">A POCKET MUSIC STUDIO</div>
+  <h1>Voice <span style="color:var(--mint)">→</span> Instrument</h1>
+  <p>Sing or hum a melody. Capture its pitch, then replay it as a synthesized instrument.</p>
+  <section class="panel">
+    <label for="instrument">CHOOSE YOUR INSTRUMENT</label>
+    <select id="instrument">
+      <option value="guitar">Electric guitar style</option>
+      <option value="piano">Piano</option>
+      <option value="bass">Bass</option>
+      <option value="synth">Synth lead</option>
+      <option value="organ">Organ</option>
+    </select>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:20px">
+      <div><div class="status">LIVE PITCH</div><div id="pitch" class="big">—</div></div>
+      <span id="state" class="pill">READY</span>
+    </div>
+    <div class="meter"><span id="meter"></span></div>
+    <div id="status" class="status">Tap Start and allow microphone access.</div>
+    <div class="actions">
+      <button id="start" class="primary">● Start singing</button>
+      <button id="stop" class="secondary" disabled>Stop & save melody</button>
+    </div>
+    <div class="actions">
+      <button id="play" class="primary" disabled>▶ Play instrument</button>
+      <button id="clear" class="secondary" disabled>Clear take</button>
+    </div>
+    <div class="note">Tip: sing one clear note at a time, with a little silence between notes. Headphones help prevent feedback.</div>
+  </section>
+  <section class="panel">
+    <div class="status">YOUR TAKE</div>
+    <div id="summary" class="big">No melody recorded yet</div>
+    <p id="details" style="margin:7px 0 0">Your detected notes will appear here after you stop.</p>
+  </section>
+  <footer>This prototype detects the pitch of your voice and recreates the melody with synthesized instrument-like sounds. It does not yet perform AI-quality voice-to-real-instrument conversion or preserve complex chords. Microphone access generally requires HTTPS or localhost in your browser.</footer>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+let stream=null,ctx=null,source=null,processor=null,analyser=null,recording=false;
+let events=[],lastMidi=null,lastAt=0,startedAt=0,playNodes=[];
+const noteNames=['C','C♯','D','D♯','E','F','F♯','G','G♯','A','A♯','B'];
+function midiName(m){return noteNames[((m%12)+12)%12]+(Math.floor(m/12)-1)}
+function freqToMidi(f){return Math.round(69+12*Math.log2(f/440))}
+function detectPitch(buf,sr){
+  let rms=0;for(let i=0;i<buf.length;i++)rms+=buf[i]*buf[i];rms=Math.sqrt(rms/buf.length);
+  if(rms<0.012)return null;
+  let size=buf.length, best=-1, bestCorr=0;
+  // Normalized autocorrelation, focused on typical singing frequencies.
+  const minLag=Math.max(2,Math.floor(sr/1000)),maxLag=Math.min(Math.floor(sr/65),size-2);
+  for(let lag=minLag;lag<=maxLag;lag++){
+    let corr=0, norm1=0,norm2=0;
+    for(let i=0;i<size-lag;i++){const a=buf[i],b=buf[i+lag];corr+=a*b;norm1+=a*a;norm2+=b*b}
+    corr/=Math.sqrt((norm1*norm2)||1);
+    if(corr>bestCorr){bestCorr=corr;best=lag}
+  }
+  if(best<0||bestCorr<0.72)return null;
+  const hz=sr/best;if(hz<65||hz>1000)return null;
+  return {hz,midi:freqToMidi(hz),rms};
+}
+function setStatus(t){$('status').textContent=t}
+$('start').onclick=async()=>{
+  try{
+    stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}});
+    ctx=new (window.AudioContext||window.webkitAudioContext)();
+    source=ctx.createMediaStreamSource(stream);analyser=ctx.createAnalyser();analyser.fftSize=2048;
+    processor=ctx.createScriptProcessor(2048,1,1);
+    source.connect(analyser);analyser.connect(processor);processor.connect(ctx.destination);
+    events=[];lastMidi=null;recording=true;startedAt=performance.now();lastAt=0;
+    $('start').disabled=true;$('stop').disabled=false;$('play').disabled=true;$('clear').disabled=true;
+    $('state').textContent='RECORDING';$('state').style.color='#69e0c0';setStatus('Listening… sing your melody.');
+    const buf=new Float32Array(analyser.fftSize);
+    processor.onaudioprocess=()=>{
+      if(!recording)return;
+      analyser.getFloatTimeDomainData(buf);
+      const p=detectPitch(buf,ctx.sampleRate);
+      if(!p){$('meter').style.width='0%';return}
+      $('meter').style.width=Math.min(100,p.rms*500)+'%';
+      $('pitch').textContent=midiName(p.midi);
+      const now=performance.now()-startedAt;
+      // Record note changes, with a small deadband to avoid vibrato creating dozens of notes.
+      if(p.midi!==lastMidi && (now-lastAt)>85){
+        events.push({midi:p.midi,t:now/1000,vel:Math.min(1,Math.max(.25,p.rms*5))});
+        lastMidi=p.midi;lastAt=now;
+      }
+    };
+  }catch(e){setStatus('Microphone unavailable. Allow microphone permission and open this page over HTTPS.');$('state').textContent='MIC NEEDED'}
+};
+$('stop').onclick=()=>{
+  recording=false;
+  if(processor){processor.disconnect();processor.onaudioprocess=null}
+  if(analyser)analyser.disconnect();if(source)source.disconnect();
+  if(stream)stream.getTracks().forEach(t=>t.stop());
+  $('start').disabled=false;$('stop').disabled=true;$('play').disabled=events.length===0;$('clear').disabled=events.length===0;
+  $('state').textContent='SAVED';$('meter').style.width='0%';
+  $('summary').textContent=events.length?`${events.length} notes captured`:'No clear notes detected';
+  $('details').textContent=events.length?events.slice(0,32).map(e=>midiName(e.midi)).join(' · ')+(events.length>32?' …':''):'Try singing louder, one note at a time, then record again.';
+  setStatus('Take saved in this page. Choose an instrument and press Play.');
+};
+function instrumentSound(midi,when,duration,vel,type){
+  const f=440*Math.pow(2,(midi-69)/12),g=ctx.createGain();
+  g.gain.setValueAtTime(0.0001,when);
+  g.gain.exponentialRampToValueAtTime(Math.max(.02,vel*.23),when+.015);
+  g.gain.exponentialRampToValueAtTime(.0001,when+duration);
+  g.connect(ctx.destination);
+  const osc=ctx.createOscillator();osc.frequency.setValueAtTime(f,when);
+  if(type==='piano'){osc.type='triangle';}
+  else if(type==='bass'){osc.type='triangle';osc.frequency.setValueAtTime(f*.5,when);}
+  else if(type==='organ'){osc.type='square';}
+  else if(type==='guitar'){osc.type='sawtooth';}
+  else {osc.type='sawtooth';}
+  const filter=ctx.createBiquadFilter();filter.type='lowpass';filter.frequency.value=type==='guitar'?2400:type==='piano'?4200:type==='bass'?700:5000;
+  osc.connect(filter);filter.connect(g);osc.start(when);osc.stop(when+duration+.03);playNodes.push(osc);
+}
+$('play').onclick=async()=>{
+  if(!events.length)return;
+  if(!ctx||ctx.state==='closed')ctx=new (window.AudioContext||window.webkitAudioContext)();
+  await ctx.resume();const type=$('instrument').value,now=ctx.currentTime+.08;
+  const end=events[events.length-1].t;
+  events.forEach((e,i)=>{
+    const next=events[i+1],gap=next?Math.max(.12,next.t-e.t):.35;
+    const dur=Math.min(1.2,Math.max(.12,gap*.88));
+    instrumentSound(e.midi,now+e.t,dur,e.vel,type);
+  });
+  $('state').textContent='PLAYING';setStatus('Playing your melody as '+$('instrument').selectedOptions[0].text+'.');
+  setTimeout(()=>{if(!recording){$('state').textContent='SAVED';setStatus('Playback finished. Try another instrument.')}},Math.max(500,(end+1.5)*1000));
+};
+$('clear').onclick=()=>{events=[];$('pitch').textContent='—';$('summary').textContent='No melody recorded yet';$('details').textContent='Your detected notes will appear here after you stop.';$('play').disabled=true;$('clear').disabled=true;$('state').textContent='READY';setStatus('Take cleared. Ready to record again.')};
+if(!navigator.mediaDevices?.getUserMedia){$('start').disabled=true;setStatus('This browser does not support microphone capture. Try a current version of Chrome.')}
+</script>
+</body>
+</html>
